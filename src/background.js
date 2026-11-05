@@ -74,8 +74,22 @@ async function patchUi(patch) {
 
 // ---------- dictionary + translation ----------
 
-function fetchJson(url) {
-  return fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS), credentials: 'omit' });
+const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Quiet retries for rate limits, 5xx and dropped connections. dictionaryapi.dev in particular
+// answers 502 to roughly every other request at times.
+const RETRY_DELAYS_MS = [800, 1600];
+
+async function fetchJson(url) {
+  const once = () => fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS), credentials: 'omit' });
+  for (const delay of RETRY_DELAYS_MS) {
+    try {
+      const res = await once();
+      if (res.status !== 429 && res.status < 500) return res;
+    } catch { /* network error or timeout: retry */ }
+    await wait(delay);
+  }
+  return once();
 }
 
 // Cheap English lemma guesses, tried in order until the dictionary knows one.
@@ -137,7 +151,7 @@ function decodeEntities(s) {
 // MyMemory returns crowd-sourced segments: strip markup, stray brackets and shouting caps,
 // and lower-case a title-cased result for a lower-case word ("Peneliti" -> "peneliti").
 function cleanTranslation(text, word, tgt) {
-  let t = decodeEntities(String(text || '').replace(/<[^>]*>/g, ''));
+  let t = decodeEntities(String(text || '')).replace(/<[^>]*>/g, '');
   t = t.replace(/[\p{Cc}\s]+/gu, ' ').trim();
   t = t.replace(/^[\s"'“”‘’.,;:!?()[\]{}-]+|[\s"'“”‘’.,;:!?()[\]{}-]+$/gu, '');
   if (t.length > 1 && t === t.toUpperCase()) t = t.toLowerCase();
@@ -147,9 +161,16 @@ function cleanTranslation(text, word, tgt) {
   return t.length > 80 ? '' : t;
 }
 
-async function translate(word, src, tgt) {
+// Segment text reduced to bare lower-case words, so "Water. " and "<i>water</i>" both match "water".
+function normSegment(s) {
+  return decodeEntities(String(s || '')).replace(/<[^>]*>/g, '')
+    .replace(/[^\p{L}\p{M}'\s-]/gu, ' ').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+// Raw MyMemory candidates for one query: [{ raw, mt, quality, query }].
+async function translationCandidates(query, src, tgt) {
   const pair = `${MYMEMORY_CODE[src] || src}|${MYMEMORY_CODE[tgt] || tgt}`;
-  const res = await fetchJson(`${TRANSLATE_URL}?q=${encodeURIComponent(word)}&langpair=${encodeURIComponent(pair)}`);
+  const res = await fetchJson(`${TRANSLATE_URL}?q=${encodeURIComponent(query)}&langpair=${encodeURIComponent(pair)}`);
   if (!res.ok) throw new Error(`Terjemahan: HTTP ${res.status}`);
   const data = await res.json();
   const main = String(data.responseData?.translatedText || '');
@@ -158,26 +179,95 @@ async function translate(word, src, tgt) {
   }
   if (Number(data.responseStatus) !== 200) throw new Error(data.responseDetails || 'Terjemahan gagal.');
 
-  const out = [];
-  const add = (raw) => {
-    const t = cleanTranslation(raw, word, tgt);
-    if (!t || t.toLowerCase() === word.toLowerCase()) return;
-    if (out.some((o) => o.toLowerCase() === t.toLowerCase())) return;
-    out.push(t);
-  };
-  add(main);
-  const matches = (data.matches || [])
-    .filter((m) => String(m.segment || '').trim().toLowerCase() === word.toLowerCase())
-    .sort((a, b) => Number(b.match) - Number(a.match) || Number(b.quality) - Number(a.quality));
-  for (const m of matches) {
-    if (out.length >= 3) break;
-    add(m.translation);
-  }
+  const q = query.toLowerCase();
+  const out = (data.matches || [])
+    .filter((m) => normSegment(m.segment) === q)
+    .map((m) => ({
+      raw: String(m.translation || ''),
+      mt: m['created-by'] === 'MT!' || /machine translation/i.test(String(m.reference || '')),
+      quality: Number(m.quality) || 0,
+      query,
+    }));
+  if (!out.length && main) out.push({ raw: main, mt: false, quality: 0, query });
   return out;
 }
 
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// 0..1 spelling similarity (Levenshtein), used to spot loanwords: zone/zona, sediment/sedimen.
+function similarity(a, b) {
+  if (!a || !b) return 0;
+  let prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    }
+    prev = cur;
+  }
+  return 1 - prev[b.length] / Math.max(a.length, b.length);
+}
+
+/**
+ * MyMemory's own ordering is unreliable for single words (its first answer for "water" is
+ * "panas"). Score candidates instead: one vote per entry that agrees, a bonus for machine
+ * translation (consistently right for single words), a penalty for ALL-CAPS UI strings
+ * ("MELE"), and half a vote when a longer answer contains it ("air" in "dalam air").
+ * Returns [{ text, score }] best first.
+ */
+function rankTranslations(candidates, word, tgt, stemWeight = 0.8) {
+  const items = [];
+  for (const c of candidates) {
+    const raw = decodeEntities(c.raw).replace(/<[^>]*>/g, '').trim();
+    if (/\p{Ll}\p{Lu}/u.test(raw)) continue; // two words glued together: "SaljuComment"
+    const shouting = raw.length > 1 && raw === raw.toUpperCase() && raw !== raw.toLowerCase();
+    const text = cleanTranslation(raw, word, tgt);
+    const key = text.toLowerCase();
+    if (!text || !/\p{L}/u.test(text) || text.split(' ').length > 4) continue;
+    if (key === word.toLowerCase() || key === c.query.toLowerCase()) continue; // left untranslated
+    let weight = (shouting ? 0.3 : 1) + (c.mt ? 1 : 0) + (0.2 * c.quality) / 100;
+    if (c.query !== word) weight *= stemWeight;
+    items.push({ text, key, weight });
+  }
+  const scores = new Map();
+  for (const it of items) {
+    const s = scores.get(it.key) || { text: it.text, score: 0 };
+    s.score += it.weight;
+    scores.set(it.key, s);
+  }
+  for (const [key, s] of scores) {
+    const inside = new RegExp(`(^|\\s)${escapeRe(key)}(\\s|$)`, 'u');
+    for (const it of items) if (it.key !== key && inside.test(it.key)) s.score += 0.5;
+    // Indonesian (like many targets) borrows heavily, so a look-alike breaks ties between
+    // equally voted answers ("zona" over "penyangga" for "zone") without beating real votes.
+    if (similarity(key, word.toLowerCase()) >= 0.6) s.score += 0.3;
+  }
+  return [...scores.values()].sort((a, b) => b.score - a.score);
+}
+
+const STRONG_SCORE = 1.5; // machine translation, or two entries agreeing
+
+async function translate(word, src, tgt, lemma) {
+  let candidates = await translationCandidates(word, src, tgt);
+  let ranked = rankTranslations(candidates, word, tgt);
+  // Weak answer for an inflected word: also ask for its base form ("melting" -> "melt").
+  if ((ranked[0]?.score ?? 0) < STRONG_SCORE && src === 'en') {
+    const stems = (lemma ? [lemma] : lemmaCandidates(word).slice(1, 3)).filter((s) => s !== word);
+    if (stems.length) {
+      const more = await Promise.allSettled(stems.map((s) => translationCandidates(s, src, tgt)));
+      candidates = candidates.concat(...more.filter((r) => r.status === 'fulfilled').map((r) => r.value));
+      ranked = rankTranslations(candidates, word, tgt);
+    }
+  }
+  // With a confident winner, show close runners-up as alternatives; with a weak one, only
+  // answers that are practically tied, so noise doesn't pass as a second meaning.
+  const top = ranked[0]?.score ?? 0;
+  const keep = top >= STRONG_SCORE ? 0.75 : 0.9;
+  return ranked.filter((r) => r.score >= top * keep).slice(0, 3).map((r) => r.text);
+}
+
 // Bump CACHE_VERSION when the shape or cleaning of a lookup result changes.
-const CACHE_VERSION = 'v1';
+const CACHE_VERSION = 'v3';
 const CACHE_LIMIT = 4000;
 
 async function pruneCache() {
@@ -197,10 +287,10 @@ async function lookup(word, src, tgt) {
   const cached = await readOne(cacheKey, null);
   if (cached) return cached;
 
-  const [dict, tr] = await Promise.allSettled([
-    src === 'en' ? define(word) : Promise.resolve(null),
-    src !== tgt ? translate(word, src, tgt) : Promise.resolve([]),
-  ]);
+  // Dictionary first: its lemma ("retreat" for "retreating") helps pick the translation.
+  const [dict] = await Promise.allSettled([src === 'en' ? define(word) : Promise.resolve(null)]);
+  const lemma = dict.status === 'fulfilled' ? dict.value?.lemma : '';
+  const [tr] = await Promise.allSettled([src !== tgt ? translate(word, src, tgt, lemma) : Promise.resolve([])]);
   const failure = [dict, tr].find((r) => r.status === 'rejected');
   const d = dict.status === 'fulfilled' ? dict.value : null;
   const result = {
@@ -283,7 +373,8 @@ const handlers = {
       }
     });
     if (deck) {
-      const words = deck.cards.filter((c) => c.status === 'loading').map((c) => c.word);
+      // A single-card retry must not re-run lookups that are already in flight for other cards.
+      const words = word ? [word] : deck.cards.filter((c) => c.status === 'loading').map((c) => c.word);
       lookupWords(deck.id, words, deck.lang, deck.target);
     }
     return {};

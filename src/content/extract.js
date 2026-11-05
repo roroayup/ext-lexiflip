@@ -28,7 +28,7 @@
     believe brought certain clear close course enough especially far feel felt full gave general group
     groups half hand high important instead kind became largely lot mean means mostly near nearly needs
     open order particular possible probably public reason recent recently second show shown simply
-    start started taking thought turn usually various whatever whose`;
+    start started taking thought turn usually various whatever whose retrieved archived`;
 
   // Indonesian function words, for pages written in Indonesian.
   const SKIP_ID = `yang dan di ke dari ini itu untuk dengan pada adalah dalam tidak akan juga atau karena
@@ -50,6 +50,10 @@
     'script', 'style', 'noscript', 'template', 'svg', 'canvas', 'code', 'pre', 'kbd', 'samp',
     'nav', 'aside', 'footer', 'form', 'button', 'select', 'textarea', 'input', 'label',
     '[hidden]', '[aria-hidden="true"]', '[role="navigation"]', '[role="complementary"]',
+    // Citations, footnotes and edit links ("Retrieved …", "Archived from the original", "[edit]").
+    'cite', 'sup', '.reference', '.references', '.reflist', '.refbegin', '.mw-references-wrap',
+    '.mw-editsection', '.navbox', '.hatnote', '.citation', '.footnotes',
+    '[role="doc-endnotes"]', '[role="doc-bibliography"]', '[role="doc-noteref"]',
     'lexiflip-widget',
   ].join(',');
   const BLOCK_SEL = 'p,li,h1,h2,h3,h4,h5,h6,blockquote,dd,dt,td,th,figcaption,div,section,article';

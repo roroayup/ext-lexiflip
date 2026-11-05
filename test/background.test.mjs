@@ -34,6 +34,19 @@ function loadBackground(fetchImpl) {
 
 const json = (status, body) => ({ status, ok: status >= 200 && status < 300, json: async () => body });
 
+// Shaped like real MyMemory answers seen for these words (en -> id), junk included.
+const MT = { quality: 70, 'created-by': 'MT!' };
+const MEMORY = {
+  glacier: [{ translation: 'gletser', ...MT }, { segment: 'Glacier', translation: 'GLETSER' }],
+  retreating: [{ translation: 'mundur' }, { segment: 'RETREATING', translation: 'Mundur' }],
+  water: [{ translation: 'panas' }, { translation: 'air' }, { segment: 'water. ', translation: 'dalam air. ' }],
+  melting: [{ segment: 'Melting', translation: 'Peleburan kontet', quality: 0 }, { segment: 'Melting', translation: 'MELE' }, { segment: 'MELTING', translation: 'MELE' }],
+  melt: [{ translation: 'meleleh', ...MT }, { segment: 'Melt the Earth', translation: 'Melelehkan Bumi' }],
+  snow: [{ segment: 'Snow', translation: 'Snow' }, { segment: 'Snow', translation: 'SaljuComment', quality: 0 }, { segment: 'Snow', translation: 'Hujan salju', quality: 0 }],
+  zone: [{ translation: 'penyangga' }, { segment: 'zone.', translation: 'dinominasikan.' }, { segment: 'Zone', translation: 'Zona' }],
+  sheet: [{ translation: 'lembar ------------------------' }, { segment: 'Sheet', translation: 'Lembar' }, { segment: 'SHEET', translation: 'LEMBAR' }],
+};
+
 function fakeNetwork(log = []) {
   return async (url) => {
     log.push(url);
@@ -48,19 +61,19 @@ function fakeNetwork(log = []) {
       return json(404, { title: 'No Definitions Found' });
     }
     const q = new URL(url).searchParams.get('q');
-    const tr = { glacier: 'gletser', retreating: 'mundur' }[q];
+    const matches = MEMORY[q] || [];
     return json(200, {
       responseStatus: 200,
-      responseData: { translatedText: tr || q },
-      matches: tr ? [{ segment: q, translation: tr.toUpperCase(), match: 1 }, { segment: q, translation: 'sungai es', match: 0.9 }] : [],
+      responseData: { translatedText: matches[0]?.translation || q },
+      matches: matches.map((m) => ({ segment: q, quality: 74, match: 0.98, ...m })),
     });
   };
 }
 
 async function waitFor(check) {
-  for (let i = 0; i < 100; i++) {
+  for (let i = 0; i < 1000; i++) {
     if (check()) return;
-    await new Promise((r) => setTimeout(r, 5));
+    await new Promise((r) => setTimeout(r, 10));
   }
   throw new Error('timed out');
 }
@@ -82,7 +95,7 @@ test('createDeck fills cards with definitions and translations', async () => {
   const [glacier, retreating, unknown] = store[key].cards;
   assert.equal(glacier.status, 'ready');
   assert.equal(glacier.phonetic, '/ˈɡleɪʃə/');
-  assert.deepEqual([...glacier.translations], ['gletser', 'sungai es']); // uppercase duplicate folded
+  assert.deepEqual([...glacier.translations], ['gletser']); // ALL-CAPS duplicate folded in
   assert.equal(glacier.senses[0].pos, 'noun');
   assert.equal(retreating.lemma, 'retreat');
   assert.equal(unknown.status, 'empty');
@@ -155,4 +168,31 @@ test('translation cleanup decodes entities, trims brackets and fixes casing', ()
   assert.equal(ctx.cleanTranslation('Gletscher', 'glacier', 'de'), 'Gletscher');
   assert.equal(ctx.cleanTranslation('Luar Biasa Sekali', 'remarkable', 'id'), 'Luar Biasa Sekali');
   assert.equal(ctx.cleanTranslation('<b>hutan</b> &amp; rimba', 'forest', 'id'), 'hutan & rimba');
+});
+
+test('picks sensible translations out of noisy translation memory', async () => {
+  const { store, send } = loadBackground(fakeNetwork());
+  const words = ['water', 'melting', 'snow', 'sheet', 'zone'].map((word) => ({ word, display: word, count: 1 }));
+  const res = await send({ type: 'createDeck', deck: { title: 'Noise', lang: 'en', words } });
+  const key = `deck:${res.id}`;
+  await waitFor(() => store[key].cards.every((c) => c.status !== 'loading'));
+  const got = Object.fromEntries(store[key].cards.map((c) => [c.word, [...c.translations]]));
+  assert.deepEqual(got.water, ['air']); // not MyMemory's first answer "panas"
+  assert.deepEqual(got.melting, ['meleleh']); // via the base form "melt", not "MELE"
+  assert.deepEqual(got.snow, ['hujan salju']); // "SaljuComment" dropped
+  assert.deepEqual(got.sheet, ['lembar']);
+  assert.deepEqual(got.zone, ['zona']); // three-way tie broken by the look-alike loanword
+});
+
+test('5xx answers are retried before giving up', async () => {
+  let calls = 0;
+  const ok = fakeNetwork();
+  const { store, send } = loadBackground(async (url) => {
+    if (url.includes('dictionaryapi') && calls++ < 2) return json(502, {}); // two 502s in a row
+    return ok(url);
+  });
+  const res = await send({ type: 'createDeck', deck: { title: 'R', lang: 'en', words: [{ word: 'glacier', display: 'glacier', count: 1 }] } });
+  await waitFor(() => store[`deck:${res.id}`].cards[0].status !== 'loading');
+  assert.equal(store[`deck:${res.id}`].cards[0].status, 'ready');
+  assert.equal(store[`deck:${res.id}`].cards[0].senses.length, 1);
 });
