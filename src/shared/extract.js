@@ -1,11 +1,12 @@
-// Turns the readable part of a page (or a piece of selected text) into a ranked list of
-// vocabulary words, each with the first sentence it appeared in. No network, no storage:
-// background.js does the lookups. Exposed as globalThis.LexiflipExtract for widget.js.
+// Turns the readable part of a page, a piece of selected text or a whole document into a
+// ranked list of vocabulary words, each with the first sentence it appeared in. No network,
+// no storage: background.js does the lookups. Exposed as globalThis.LexiflipExtract.
+// Always overwrites, so a re-injected copy after an extension update wins.
 (() => {
   'use strict';
-  if (globalThis.LexiflipExtract) return;
 
-  const MAX_CHARS = 60000;
+  const MAX_CHARS = 60000; // page text
+  const MAX_DOC_CHARS = 500000; // uploaded documents (a few hundred pages)
 
   // English function words plus very common words that make poor flashcards.
   const SKIP_EN = `a about above after again against all almost also although always am among an and
@@ -219,13 +220,63 @@
     return ranked.slice(0, maxCards).map(({ score, ...card }) => card);
   }
 
+  // Function words per language; the language whose words show up most often wins.
+  const LANG_HINTS = {
+    en: 'the and of to is in that it was for with as are this be on not by',
+    id: 'yang dan di ini itu dengan untuk dari tidak dalam akan pada adalah juga ke',
+    de: 'der die und das ist nicht ein eine zu den mit sich auf für ich von',
+    fr: 'le la les et est des une un pas que du en pour qui dans sur',
+    es: 'el la los las que de y en un una es por con para no se',
+    nl: 'de het een en van is dat niet op te zijn met voor ook',
+    pt: 'o a os as que de e do da em um uma não para com se',
+  };
+  const HINT_SETS = Object.fromEntries(Object.entries(LANG_HINTS).map(([k, v]) => [k, toSet(v)]));
+
+  /** Best-effort language of a text: script for CJK/Cyrillic/Arabic, function words otherwise. */
+  function guessLang(text) {
+    const sample = String(text || '').slice(0, 20000);
+    const count = (re) => (sample.match(re) || []).length;
+    const kana = count(/[\p{Script=Hiragana}\p{Script=Katakana}]/gu);
+    const hangul = count(/\p{Script=Hangul}/gu);
+    const han = count(/\p{Script=Han}/gu);
+    if (kana > 20) return 'ja';
+    if (hangul > 20) return 'ko';
+    if (han > 20) return 'zh';
+    if (count(/\p{Script=Cyrillic}/gu) > 50) return 'ru';
+    if (count(/\p{Script=Arabic}/gu) > 50) return 'ar';
+    const scores = Object.fromEntries(Object.keys(HINT_SETS).map((k) => [k, 0]));
+    for (const w of sample.toLowerCase().match(/\p{L}+/gu) || []) {
+      for (const k in HINT_SETS) if (HINT_SETS[k].has(w)) scores[k] += 1;
+    }
+    const [best, n] = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+    return n >= 3 ? best : 'en';
+  }
+
   function fromText(text, opts) {
     return { title: `Teks pilihan · ${pageTitle()}`, words: analyze(String(text || '').slice(0, MAX_CHARS), opts) };
   }
 
-  function fromPage(opts) {
-    return { title: pageTitle(), words: analyze(collectText(mainRoot()), opts) };
+  function fromDocument(text, opts) {
+    return analyze(String(text || '').slice(0, MAX_DOC_CHARS), opts);
   }
 
-  globalThis.LexiflipExtract = { analyze, fromText, fromPage, pageLang };
+  function fromPage(opts) {
+    const text = collectText(mainRoot());
+    const lang = opts.lang || pageLang() || guessLang(text);
+    return { title: pageTitle(), lang, words: analyze(text, { ...opts, lang }) };
+  }
+
+  /** The sentence around a selection, for the "Di artikel" line of a card. */
+  function sentenceAround(range, phrase) {
+    const node = range?.startContainer;
+    const el = node?.nodeType === 1 ? node : node?.parentElement;
+    const block = el?.closest('p,li,dd,dt,td,th,blockquote,figcaption,h1,h2,h3,h4,h5,h6,section,article,div') || el;
+    const text = (block?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    const needle = phrase.toLowerCase();
+    const sentence = text.split(/(?<=[.!?。！？])\s+/).find((s) => s.toLowerCase().includes(needle)) || text;
+    return clip(sentence, phrase);
+  }
+
+  globalThis.LexiflipExtract = { analyze, fromText, fromPage, fromDocument, pageLang, pageTitle, guessLang, sentenceAround };
 })();

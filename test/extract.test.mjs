@@ -6,7 +6,7 @@ import { createContext, runInContext } from 'node:vm';
 function loadExtract() {
   const ctx = createContext({ Intl, console });
   ctx.globalThis = ctx;
-  runInContext(readFileSync(new URL('../src/content/extract.js', import.meta.url), 'utf8'), ctx);
+  runInContext(readFileSync(new URL('../src/shared/extract.js', import.meta.url), 'utf8'), ctx);
   return ctx.LexiflipExtract;
 }
 

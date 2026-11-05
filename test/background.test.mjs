@@ -43,6 +43,8 @@ const MEMORY = {
   melting: [{ segment: 'Melting', translation: 'Peleburan kontet', quality: 0 }, { segment: 'Melting', translation: 'MELE' }, { segment: 'MELTING', translation: 'MELE' }],
   melt: [{ translation: 'meleleh', ...MT }, { segment: 'Melt the Earth', translation: 'Melelehkan Bumi' }],
   snow: [{ segment: 'Snow', translation: 'Snow' }, { segment: 'Snow', translation: 'SaljuComment', quality: 0 }, { segment: 'Snow', translation: 'Hujan salju', quality: 0 }],
+  chamber: [{ translation: 'chamber', ...MT }, { segment: 'Chamber', translation: 'Chamber' }],
+  'A room or compartment.': [{ translation: 'Sebuah ruangan atau kompartemen.' }],
   zone: [{ translation: 'penyangga' }, { segment: 'zone.', translation: 'dinominasikan.' }, { segment: 'Zone', translation: 'Zona' }],
   sheet: [{ translation: 'lembar ------------------------' }, { segment: 'Sheet', translation: 'Lembar' }, { segment: 'SHEET', translation: 'LEMBAR' }],
 };
@@ -54,6 +56,9 @@ function fakeNetwork(log = []) {
       const word = decodeURIComponent(url.split('/').pop());
       if (word === 'glacier') {
         return json(200, [{ word, phonetic: '/ˈɡleɪʃə/', meanings: [{ partOfSpeech: 'noun', definitions: [{ definition: 'A slowly moving mass of ice.' }] }] }]);
+      }
+      if (word === 'chamber') {
+        return json(200, [{ word, meanings: [{ partOfSpeech: 'noun', definitions: [{ definition: 'A room or compartment.' }] }] }]);
       }
       if (word === 'retreat') {
         return json(200, [{ word, meanings: [{ partOfSpeech: 'verb', definitions: [{ definition: 'To move back.' }] }] }]);
@@ -150,13 +155,95 @@ test('known flags, deletion and the deck limit', async () => {
   assert.equal(store.activeDeckId, ids.at(-2));
 });
 
-test('toolbar button toggles between hidden and open', async () => {
+test('Alt+Shift+K toggles between hidden and open', async () => {
   const { store, listeners } = loadBackground(fakeNetwork());
   store.ui = { hidden: false, open: false, index: 0, onlyUnknown: false };
-  await listeners.action();
+  await listeners.command('toggle-widget');
   await waitFor(() => store.ui.open === true);
-  await listeners.action();
+  await listeners.command('toggle-widget');
   await waitFor(() => store.ui.hidden === true);
+});
+
+test('manual words go to "Kosakata saya", keep a typed meaning and still get definitions', async () => {
+  const { store, send } = loadBackground(fakeNetwork());
+  const res = await send({
+    type: 'addCards',
+    cards: [{ word: 'Glacier', translations: ['sungai es'], context: 'A glacier moves slowly.', manualMeaning: true }],
+  });
+  assert.equal(res.ok, true);
+  assert.equal(res.deckId, 'mine');
+  await waitFor(() => store['deck:mine'].cards[0].status === 'ready' && store['deck:mine'].cards[0].senses?.length);
+  const card = store['deck:mine'].cards[0];
+  assert.equal(card.word, 'glacier');
+  assert.equal(card.display, 'Glacier');
+  assert.deepEqual([...card.translations], ['sungai es']); // not replaced by "gletser"
+  assert.equal(card.phonetic, '/ˈɡleɪʃə/');
+  assert.equal(store['deck:mine'].title, 'Kosakata saya');
+  assert.equal(store.decks[0].id, 'mine');
+});
+
+test('adding the same word twice merges instead of duplicating', async () => {
+  const { store, send } = loadBackground(fakeNetwork());
+  await send({ type: 'addCards', cards: [{ word: 'water', translations: ['air'], senses: [{ pos: 'noun', def: 'H2O' }], lookup: false }] });
+  const res = await send({ type: 'addCards', cards: [{ word: ' Water ', context: 'Fresh water.' }] });
+  assert.equal(res.added, 0);
+  assert.equal(res.updated, 1);
+  const cards = store['deck:mine'].cards;
+  assert.equal(cards.length, 1);
+  assert.equal(cards[0].context, 'Fresh water.');
+  assert.equal(cards[0].status, 'ready');
+});
+
+test('a word without meaning is looked up; a complete preview is stored as-is', async () => {
+  const log = [];
+  const { store, send } = loadBackground(fakeNetwork(log));
+  await send({ type: 'addCards', cards: [{ word: 'zone' }] });
+  await waitFor(() => store['deck:mine'].cards[0].status !== 'loading');
+  assert.deepEqual([...store['deck:mine'].cards[0].translations], ['zona']);
+  const calls = log.length;
+  await send({ type: 'addCards', cards: [{ word: 'snow', translations: ['salju'], lookup: false }] });
+  assert.equal(store['deck:mine'].cards[1].status, 'ready');
+  assert.equal(log.length, calls); // no network for a complete preview
+});
+
+test('editing a card: new meaning sticks, a new word is looked up again, duplicates refused', async () => {
+  const { store, send } = loadBackground(fakeNetwork());
+  await send({ type: 'addCards', cards: [{ word: 'water', translations: ['air'], lookup: false }, { word: 'snow', translations: ['salju'], lookup: false }] });
+  let res = await send({ type: 'updateCard', deckId: 'mine', word: 'water', patch: { translations: ['air', 'perairan'], context: 'Water is wet.' } });
+  assert.equal(res.word, 'water');
+  let card = store['deck:mine'].cards[0];
+  assert.deepEqual([...card.translations], ['air', 'perairan']);
+  assert.equal(card.manualMeaning, true);
+  assert.equal(card.context, 'Water is wet.');
+
+  res = await send({ type: 'updateCard', deckId: 'mine', word: 'water', patch: { display: 'Glacier', translations: [] } });
+  assert.equal(res.word, 'glacier');
+  await waitFor(() => store['deck:mine'].cards[0].status === 'ready');
+  card = store['deck:mine'].cards[0];
+  assert.deepEqual([...card.translations], ['gletser']);
+
+  res = await send({ type: 'updateCard', deckId: 'mine', word: 'glacier', patch: { display: 'SNOW' } });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /sudah ada/);
+});
+
+test('lookupWord previews without touching any deck', async () => {
+  const { store, send } = loadBackground(fakeNetwork());
+  const res = await send({ type: 'lookupWord', word: 'Water', lang: 'en' });
+  assert.equal(res.ok, true);
+  assert.deepEqual([...res.result.translations], ['air']);
+  assert.equal(res.target, 'id');
+  assert.equal(store.decks, undefined);
+});
+
+test('"Kosakata saya" survives the deck limit', async () => {
+  const { store, send } = loadBackground(fakeNetwork());
+  await send({ type: 'addCards', cards: [{ word: 'snow', translations: ['salju'], lookup: false }] });
+  const words = [{ word: 'water', translations: ['air'], senses: [{ pos: 'n', def: 'x' }] }];
+  for (let i = 0; i < 31; i++) await send({ type: 'createDeck', deck: { title: `D${i}`, lang: 'en', words } });
+  assert.equal(store.decks.length, 31); // "Kosakata saya" + 30 newest
+  assert.equal(store.decks[0].id, 'mine');
+  assert.ok(store['deck:mine']);
 });
 
 test('translation cleanup decodes entities, trims brackets and fixes casing', () => {
@@ -195,4 +282,14 @@ test('5xx answers are retried before giving up', async () => {
   await waitFor(() => store[`deck:${res.id}`].cards[0].status !== 'loading');
   assert.equal(store[`deck:${res.id}`].cards[0].status, 'ready');
   assert.equal(store[`deck:${res.id}`].cards[0].senses.length, 1);
+});
+
+test('a word MyMemory only echoes gets its definition translated instead', async () => {
+  const { store, send } = loadBackground(fakeNetwork());
+  await send({ type: 'addCards', cards: [{ word: 'chamber' }] });
+  await waitFor(() => store['deck:mine'].cards[0].status !== 'loading');
+  const card = store['deck:mine'].cards[0];
+  assert.deepEqual([...card.translations], []); // "chamber" -> "chamber" is not a translation
+  assert.equal(card.defTranslation, 'Sebuah ruangan atau kompartemen.');
+  assert.equal(card.status, 'ready');
 });

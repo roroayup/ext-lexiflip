@@ -12,7 +12,7 @@ const MAX_DECKS = 30;
 const LOOKUP_WORKERS = 3;
 const TIMEOUT_MS = 10000;
 
-const DEFAULT_SETTINGS = { target: 'id', source: 'auto', maxCards: 20, minLength: 4, corner: 'right' };
+const DEFAULT_SETTINGS = { target: 'id', source: 'auto', maxCards: 20, minLength: 4, corner: 'right', selectionBubble: true };
 const DEFAULT_UI = { hidden: false, open: false, index: 0, onlyUnknown: false };
 
 // MyMemory wants a region for a few languages.
@@ -40,6 +40,8 @@ function deckMeta(deck) {
     id: deck.id,
     title: deck.title,
     url: deck.url,
+    lang: deck.lang,
+    source: deck.source || 'page',
     createdAt: deck.createdAt,
     total: deck.cards.length,
     known: deck.cards.filter((c) => c.known).length,
@@ -95,6 +97,7 @@ async function fetchJson(url) {
 // Cheap English lemma guesses, tried in order until the dictionary knows one.
 function lemmaCandidates(word) {
   const out = [word];
+  if (/s/.test(word)) return out; // phrases: no suffix guessing
   const add = (w) => { if (w.length >= 3 && !out.includes(w)) out.push(w); };
   if (word.endsWith('ies')) add(`${word.slice(0, -3)}y`);
   if (word.endsWith('ied')) add(`${word.slice(0, -3)}y`);
@@ -247,6 +250,17 @@ function rankTranslations(candidates, word, tgt, stemWeight = 0.8) {
 
 const STRONG_SCORE = 1.5; // machine translation, or two entries agreeing
 
+/** Sentence translation (definitions): MyMemory's main answer, cleaned. */
+async function translateText(text, src, tgt) {
+  const pair = `${MYMEMORY_CODE[src] || src}|${MYMEMORY_CODE[tgt] || tgt}`;
+  const res = await fetchJson(`${TRANSLATE_URL}?q=${encodeURIComponent(text.slice(0, 400))}&langpair=${encodeURIComponent(pair)}`);
+  if (!res.ok) throw new Error(`Terjemahan: HTTP ${res.status}`);
+  const data = await res.json();
+  const out = decodeEntities(String(data.responseData?.translatedText || '')).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+  if (data.quotaFinished === true || Number(data.responseStatus) !== 200 || /MYMEMORY WARNING/i.test(out)) return '';
+  return out.toLowerCase() === text.trim().toLowerCase() ? '' : out;
+}
+
 async function translate(word, src, tgt, lemma) {
   let candidates = await translationCandidates(word, src, tgt);
   let ranked = rankTranslations(candidates, word, tgt);
@@ -267,7 +281,7 @@ async function translate(word, src, tgt, lemma) {
 }
 
 // Bump CACHE_VERSION when the shape or cleaning of a lookup result changes.
-const CACHE_VERSION = 'v3';
+const CACHE_VERSION = 'v4';
 const CACHE_LIMIT = 4000;
 
 async function pruneCache() {
@@ -298,8 +312,17 @@ async function lookup(word, src, tgt) {
     phonetic: d?.phonetic || '',
     senses: d?.senses || [],
     translations: tr.status === 'fulfilled' ? tr.value : [],
+    defTranslation: '',
     error: '',
   };
+  // No usable word translation (MyMemory often just echoes the word: "chamber" -> "chamber"):
+  // translate the first definition instead, so the card still has a meaning in the user's
+  // language ("A room or compartment" -> "Sebuah ruangan atau kompartemen").
+  if (!result.translations.length && result.senses.length && src !== tgt) {
+    try {
+      result.defTranslation = await translateText(result.senses[0].def, src, tgt);
+    } catch { /* the English definition is still shown */ }
+  }
   const found = result.senses.length > 0 || result.translations.length > 0;
   if (!found && failure) {
     return { ...result, status: 'error', error: String(failure.reason?.message || failure.reason) };
@@ -309,58 +332,218 @@ async function lookup(word, src, tgt) {
   return result;
 }
 
-async function lookupWords(deckId, words, src, tgt) {
+// ---------- cards and decks ----------
+
+const MINE = 'mine';
+const MINE_TITLE = 'Kosakata saya';
+const cardKey = (s) => String(s || '').normalize('NFC').trim().replace(/\s+/g, ' ').toLowerCase();
+const newId = () => `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+
+async function getSettings() {
+  return { ...DEFAULT_SETTINGS, ...(await readOne('settings', {})) };
+}
+
+// Merge a lookup into a card. A meaning the user typed in themselves always wins; the
+// lookup then only adds pronunciation and definitions.
+function applyLookup(card, result) {
+  const { translations, ...rest } = result;
+  const keepMeaning = card.manualMeaning && card.translations?.length;
+  Object.assign(card, rest);
+  if (keepMeaning) {
+    card.status = 'ready';
+    card.error = '';
+  } else {
+    card.translations = translations || [];
+  }
+}
+
+async function lookupWords(deckId, items, tgt) {
   let next = 0;
   const worker = async () => {
-    while (next < words.length) {
-      const word = words[next++];
+    while (next < items.length) {
+      const { word, lang } = items[next++];
       let result;
       try {
-        result = await lookup(word, src, tgt);
+        result = await lookup(word, lang, tgt);
       } catch (err) {
         result = { status: 'error', error: String(err?.message || err) };
       }
       await updateDeck(deckId, (deck) => {
         const card = deck.cards.find((c) => c.word === word);
-        if (card) Object.assign(card, result);
+        if (card) applyLookup(card, result);
       });
     }
   };
   await Promise.all(Array.from({ length: LOOKUP_WORKERS }, worker));
 }
 
+const lookupItems = (deck, cards) => cards.map((c) => ({ word: c.word, lang: c.lang || deck.lang }));
+
+function newDeck({ id, title, url, lang, source }, target) {
+  const now = Date.now();
+  return {
+    id: id || newId(),
+    title: String(title || 'Tanpa judul').slice(0, 140),
+    url: String(url || ''),
+    lang: String(lang || 'en'),
+    source: source || 'page',
+    target,
+    createdAt: now,
+    updatedAt: now,
+    cards: [],
+  };
+}
+
+// Newest first, with "Kosakata saya" pinned on top and never pruned.
+function orderMeta(list) {
+  const mine = list.filter((d) => d.id === MINE);
+  const rest = list.filter((d) => d.id !== MINE).sort((a, b) => b.createdAt - a.createdAt);
+  return [...mine, ...rest];
+}
+
+/**
+ * Add or merge cards into a deck, creating the deck when needed (`deckId` 'new' with
+ * `deckInfo`, or the "Kosakata saya" deck on first use). Cards that still need a meaning or
+ * a definition are looked up afterwards.
+ */
+async function addCards({ deckId, deckInfo, cards: inputs, activate }) {
+  const settings = await getSettings();
+  const toLookup = [];
+  let added = 0;
+  let updated = 0;
+
+  const deck = await serial(async () => {
+    let d = deckId && deckId !== 'new' ? await readOne(deckKey(deckId), null) : null;
+    if (!d) {
+      if (deckId === MINE) d = newDeck({ id: MINE, title: MINE_TITLE, lang: deckInfo?.lang || 'en', source: 'manual' }, settings.target);
+      else if (deckId === 'new' || !deckId) d = newDeck(deckInfo || {}, settings.target);
+      else throw new Error('Dek tidak ditemukan.');
+    }
+
+    for (const input of inputs || []) {
+      const key = cardKey(input.word || input.display);
+      if (!key) continue;
+      const translations = (input.translations || []).map((t) => String(t).trim()).filter(Boolean);
+      let card = d.cards.find((c) => c.word === key);
+      if (card) {
+        if (translations.length) {
+          card.translations = translations;
+          card.manualMeaning = Boolean(input.manualMeaning) || card.manualMeaning;
+          if (card.status !== 'ready') { card.status = 'ready'; card.error = ''; }
+        }
+        if (input.context && !card.context) card.context = input.context;
+        if (input.senses?.length && !card.senses?.length) card.senses = input.senses;
+        updated++;
+        continue;
+      }
+      card = {
+        word: key,
+        display: String(input.display || input.word).trim().replace(/\s+/g, ' '),
+        lang: input.lang || d.lang,
+        count: input.count || 1,
+        context: input.context || '',
+        translations,
+        senses: input.senses || [],
+        phonetic: input.phonetic || '',
+        lemma: input.lemma || '',
+        manualMeaning: Boolean(input.manualMeaning && translations.length),
+        known: false,
+        error: '',
+        addedAt: Date.now(),
+      };
+      // A complete preview (selection popover) needs no second lookup; anything without a
+      // meaning, or a hand-typed meaning without definitions, does.
+      const complete = input.lookup === false || (translations.length > 0 && card.senses.length > 0);
+      if (complete) card.status = translations.length || card.senses.length ? 'ready' : 'empty';
+      else {
+        card.status = 'loading';
+        toLookup.push(card);
+      }
+      d.cards.push(card);
+      added++;
+    }
+
+    d.updatedAt = Date.now();
+    const list = orderMeta([deckMeta(d), ...(await readOne('decks', [])).filter((m) => m.id !== d.id)]);
+    const keep = [];
+    const dropped = [];
+    let others = 0;
+    for (const m of list) (m.id === MINE || others++ < MAX_DECKS ? keep : dropped).push(m);
+    if (dropped.length) await local.remove(dropped.map((m) => deckKey(m.id)));
+    const patch = { [deckKey(d.id)]: d, decks: keep };
+    // With nothing being studied yet, the deck that just got a card becomes the one shown.
+    if (activate || !(await readOne('activeDeckId', null))) patch.activeDeckId = d.id;
+    await local.set(patch);
+    return d;
+  });
+
+  if (toLookup.length) lookupWords(deck.id, lookupItems(deck, toLookup), deck.target);
+  return { deckId: deck.id, added, updated };
+}
+
 // ---------- message handlers ----------
 
 const handlers = {
+  // Article/selection/document -> a new deck of the words the user picked.
   async createDeck({ deck: input }) {
-    const settings = { ...DEFAULT_SETTINGS, ...(await readOne('settings', {})) };
-    const now = Date.now();
-    const deck = {
-      id: `${now.toString(36)}${Math.random().toString(36).slice(2, 6)}`,
-      title: String(input.title || 'Tanpa judul').slice(0, 140),
-      url: String(input.url || ''),
-      lang: String(input.lang || 'en'),
-      target: settings.target,
-      createdAt: now,
-      updatedAt: now,
-      cards: (input.words || []).map((w) => ({
-        word: w.word,
-        display: w.display || w.word,
-        count: w.count || 1,
-        context: w.context || '',
-        status: 'loading',
-        known: false,
-      })),
-    };
-    await serial(async () => {
-      const decks = [deckMeta(deck), ...(await readOne('decks', []))];
-      const dropped = decks.slice(MAX_DECKS).map((d) => deckKey(d.id));
-      if (dropped.length) await local.remove(dropped);
-      await local.set({ [deckKey(deck.id)]: deck, decks: decks.slice(0, MAX_DECKS), activeDeckId: deck.id });
-    });
+    const res = await addCards({ deckId: 'new', deckInfo: input, cards: input.words || [], activate: true });
     await patchUi({ hidden: false, open: true, index: 0, onlyUnknown: false });
-    lookupWords(deck.id, deck.cards.map((c) => c.word), deck.lang, deck.target);
-    return { id: deck.id };
+    return { id: res.deckId };
+  },
+
+  // Manual add, selection popover, or picked words saved into an existing deck.
+  async addCards({ deckId, deckInfo, cards, activate }) {
+    const res = await addCards({ deckId: deckId || MINE, deckInfo, cards, activate });
+    if (activate) await patchUi({ index: 0, onlyUnknown: false });
+    return res;
+  },
+
+  async updateCard({ deckId, word, patch }) {
+    let relookup = null;
+    let newKey = word;
+    const deck = await updateDeck(deckId, (d) => {
+      const card = d.cards.find((c) => c.word === word);
+      if (!card) throw new Error('Kartu tidak ditemukan.');
+      if (patch.display !== undefined) {
+        const display = String(patch.display).trim().replace(/\s+/g, ' ');
+        const key = cardKey(display);
+        if (!key) throw new Error('Kata tidak boleh kosong.');
+        if (key !== card.word && d.cards.some((c) => c.word === key)) throw new Error('Kata itu sudah ada di dek ini.');
+        if (key !== card.word) {
+          Object.assign(card, { word: key, senses: [], phonetic: '', lemma: '' });
+          relookup = card;
+        }
+        card.display = display;
+        newKey = key;
+      }
+      if (patch.context !== undefined) card.context = String(patch.context).trim();
+      if (patch.translations !== undefined) {
+        card.translations = patch.translations.map((t) => String(t).trim()).filter(Boolean);
+        card.manualMeaning = card.translations.length > 0;
+        if (!card.manualMeaning) relookup = card;
+      }
+      if (relookup) {
+        card.status = 'loading';
+        card.error = '';
+      } else if (card.translations?.length || card.senses?.length) {
+        card.status = 'ready';
+        card.error = '';
+      }
+    });
+    if (deck && relookup) lookupWords(deck.id, lookupItems(deck, [relookup]), deck.target);
+    return { word: newKey };
+  },
+
+  // Preview for the selection popover and the "Cari arti otomatis" button. Uses the cache.
+  async lookupWord({ word, lang }) {
+    const settings = await getSettings();
+    const result = await lookup(cardKey(word), lang || 'en', settings.target);
+    return { result, target: settings.target };
+  },
+
+  async openApp({ hash }) {
+    await api.tabs.create({ url: api.runtime.getURL('app/app.html') + (hash ? `#${hash}` : '') });
+    return {};
   },
 
   async retry({ deckId, word }) {
@@ -374,8 +557,8 @@ const handlers = {
     });
     if (deck) {
       // A single-card retry must not re-run lookups that are already in flight for other cards.
-      const words = word ? [word] : deck.cards.filter((c) => c.status === 'loading').map((c) => c.word);
-      lookupWords(deck.id, words, deck.lang, deck.target);
+      const cards = deck.cards.filter((c) => (word ? c.word === word : c.status === 'loading'));
+      lookupWords(deck.id, lookupItems(deck, cards), deck.target);
     }
     return {};
   },
@@ -440,15 +623,13 @@ api.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   return true; // keep the channel open for the async reply (works in Chrome and Firefox)
 });
 
-// ---------- toolbar button, shortcut, context menu ----------
+// ---------- shortcut, context menu, install ----------
 
 async function toggleWidget() {
   const ui = { ...DEFAULT_UI, ...(await readOne('ui', {})) };
   const show = ui.hidden || !ui.open;
   await patchUi(show ? { hidden: false, open: true } : { hidden: true });
 }
-
-api.action.onClicked.addListener(() => { toggleWidget(); });
 
 api.commands?.onCommand.addListener((command) => {
   if (command === 'toggle-widget') toggleWidget();
@@ -460,7 +641,7 @@ function createMenus() {
   if (!menus) return;
   // Promise form only: Firefox's browser.* namespace does not take callbacks.
   Promise.resolve(menus.removeAll()).then(() => {
-    menus.create({ id: 'lexiflip-selection', title: 'Buat flashcard dari teks terpilih', contexts: ['selection'] });
+    menus.create({ id: 'lexiflip-selection', title: 'Tambahkan “%s” ke Lexiflip', contexts: ['selection'] });
     menus.create({ id: 'lexiflip-page', title: 'Buat flashcard dari halaman ini', contexts: ['page'] });
   }).catch(() => {});
 }
@@ -470,15 +651,33 @@ menus?.onClicked.addListener((info, tab) => {
   const message = info.menuItemId === 'lexiflip-selection'
     ? { type: 'build', mode: 'selection', text: info.selectionText || '' }
     : { type: 'build', mode: 'page' };
-  // Fails on pages where extensions may not run (browser settings, web stores, PDF viewer).
-  Promise.resolve(api.tabs.sendMessage(tab.id, message)).catch(() => {});
+  // Pages where extensions may not run (browser pages, web stores, PDF viewer): open the
+  // full Lexiflip page instead so the click still does something.
+  Promise.resolve(api.tabs.sendMessage(tab.id, message)).catch(() => {
+    const word = message.mode === 'selection' ? message.text.trim() : '';
+    const short = word && word.split(/\s+/).length <= 4;
+    handlers.openApp({ hash: short ? `add=${encodeURIComponent(word)}` : '' }).catch(() => {});
+  });
 });
+
+// Tabs opened before an install or update have no widget (or a disconnected one, which
+// would throw "Extension context invalidated" on every click). Inject a fresh copy; the new
+// widget removes the stale one.
+async function injectIntoOpenTabs() {
+  const files = api.runtime.getManifest().content_scripts?.[0]?.js || [];
+  if (!api.scripting || !files.length) return;
+  const tabs = await api.tabs.query({ url: ['http://*/*', 'https://*/*'] });
+  await Promise.all(tabs
+    .filter((t) => t.id >= 0 && !t.discarded)
+    .map((t) => Promise.resolve(api.scripting.executeScript({ target: { tabId: t.id }, files })).catch(() => {})));
+}
 
 api.runtime.onInstalled.addListener(async () => {
   createMenus();
   const settings = await readOne('settings', null);
   if (!settings) await local.set({ settings: DEFAULT_SETTINGS, ui: DEFAULT_UI, decks: [], activeDeckId: null });
   pruneCache().catch(() => {});
+  injectIntoOpenTabs().catch(() => {});
 });
 
 api.runtime.onStartup.addListener(() => {

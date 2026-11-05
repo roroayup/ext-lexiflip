@@ -19,20 +19,41 @@ const GECKO_ID = '{b11a9c72-8daf-457d-8be0-8479260546b4}';
 
 const ICONS = { 16: 'icons/icon-16.png', 32: 'icons/icon-32.png', 48: 'icons/icon-48.png', 96: 'icons/icon-96.png', 128: 'icons/icon-128.png' };
 
+// Order matters: core defines LX, ui.js needs extract/styles, widget.js mounts everything.
+const CONTENT_SCRIPTS = ['shared/core.js', 'shared/extract.js', 'shared/styles.js', 'shared/ui.js', 'content/widget.js'];
+
+// Mozilla's pdf.js (Apache-2.0), copied unmodified from node_modules for the PDF reader.
+const VENDOR = {
+  'vendor/pdf.min.mjs': 'node_modules/pdfjs-dist/legacy/build/pdf.min.mjs',
+  'vendor/pdf.worker.min.mjs': 'node_modules/pdfjs-dist/legacy/build/pdf.worker.min.mjs',
+  'vendor/pdfjs-LICENSE': 'node_modules/pdfjs-dist/LICENSE',
+};
+
 function manifest(target) {
   const base = {
     manifest_version: 3,
     name: 'Lexiflip',
     short_name: 'Lexiflip',
     version: pkg.version,
-    description: 'Ubah artikel apa pun menjadi flashcard kosakata beserta artinya, langsung di pojok layar saat membaca.',
+    description: 'Flashcard kosakata dari artikel, dokumen, atau kata yang kamu tambahkan sendiri, selalu siap di pojok layar.',
     icons: ICONS,
-    action: { default_title: 'Lexiflip: tampilkan/sembunyikan flashcard', default_icon: { 16: ICONS[16], 32: ICONS[32], 48: ICONS[48] } },
-    permissions: ['storage', 'contextMenus'],
-    host_permissions: ['https://api.dictionaryapi.dev/*', 'https://api.mymemory.translated.net/*'],
+    action: {
+      default_title: 'Lexiflip',
+      default_popup: 'popup/popup.html',
+      default_icon: { 16: ICONS[16], 32: ICONS[32], 48: ICONS[48] },
+    },
+    // scripting + the http(s) host permissions: re-inject the widget into tabs that were
+    // already open when Lexiflip was installed or updated (see injectIntoOpenTabs).
+    permissions: ['storage', 'contextMenus', 'scripting'],
+    host_permissions: [
+      'https://api.dictionaryapi.dev/*',
+      'https://api.mymemory.translated.net/*',
+      'http://*/*',
+      'https://*/*',
+    ],
     content_scripts: [{
       matches: ['http://*/*', 'https://*/*'],
-      js: ['content/extract.js', 'content/styles.js', 'content/widget.js'],
+      js: CONTENT_SCRIPTS,
       run_at: 'document_idle',
     }],
     commands: {
@@ -72,7 +93,14 @@ function check(target, man, outDir) {
     ...Object.values(man.icons),
     ...man.content_scripts.flatMap((c) => c.js),
     ...(man.background.scripts || [man.background.service_worker]),
+    man.action.default_popup,
+    ...Object.keys(VENDOR),
   ];
+  // Scripts referenced from the extension pages.
+  for (const page of [man.action.default_popup, 'app/app.html']) {
+    const html = readFileSync(join(outDir, page), 'utf8');
+    for (const [, src] of html.matchAll(/<script src="([^"]+)"/g)) referenced.push(join(dirname(page), src));
+  }
   for (const file of referenced) {
     if (!existsSync(join(outDir, file))) throw new Error(`[${target}] manifest references missing file: ${file}`);
   }
@@ -93,6 +121,11 @@ for (const target of targets) {
   rmSync(outDir, { recursive: true, force: true });
   mkdirSync(outDir, { recursive: true });
   cpSync(SRC, outDir, { recursive: true });
+  for (const [to, from] of Object.entries(VENDOR)) {
+    if (!existsSync(join(ROOT, from))) throw new Error(`Missing ${from}. Run "npm install" first.`);
+    mkdirSync(dirname(join(outDir, to)), { recursive: true });
+    cpSync(join(ROOT, from), join(outDir, to));
+  }
 
   const man = manifest(target);
   writeFileSync(join(outDir, 'manifest.json'), `${JSON.stringify(man, null, 2)}\n`);

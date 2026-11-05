@@ -1,43 +1,69 @@
 # Lexiflip
 
-Ekstensi browser yang mengubah artikel yang sedang kamu baca menjadi flashcard kosakata
-beserta artinya. Widget-nya ada di pojok bawah layar dan tetap muncul di setiap tab dan
-jendela browser, dengan dek dan posisi kartu yang sama.
+Ekstensi browser untuk menghafal kosakata dengan flashcard. Kartunya bisa dibuat dari artikel
+yang sedang dibaca, dari dokumen yang di-upload, dari teks yang diblok, atau dari kata yang kamu
+ketik sendiri, lengkap dengan arti dan contoh kalimat. Widget-nya ada di pojok bawah layar dan
+muncul di setiap tab dan jendela browser dengan dek dan posisi kartu yang sama. Ada juga halaman
+belajar penuh yang bisa dibuka kapan saja.
 
 Satu kode sumber untuk **Chrome**, **Microsoft Edge**, dan **Firefox** (Manifest V3).
 Tanpa akun dan tanpa server sendiri. Semua data tersimpan di browser pengguna.
 
 ## Fitur
 
-- **Artikel → kartu**: mengambil isi utama halaman (bukan menu atau footer), membuang kata
-  umum, nama orang, nama tempat, dan singkatan, lalu memilih kata yang paling sering muncul.
-- **Blok teks → kartu**: blok sebagian teks lalu klik *Buat dari halaman ini*, atau klik kanan →
-  *Buat flashcard dari teks terpilih*.
-- **Arti lengkap**: terjemahan (default Bahasa Indonesia, bisa diganti ke 14 bahasa), definisi
-  bahasa Inggris dengan kelas kata, transkripsi fonetik, bentuk dasar (*retreating → retreat*),
-  dan kalimat asal dari artikel dengan kata yang di-highlight.
-- **Belajar**: kartu bolak-balik (klik atau Spasi), ←/→ untuk pindah kartu, tandai
-  *Sudah hafal*/*Belum hafal*, filter hanya yang belum hafal, acak urutan, dan pelafalan suara.
-- **Tetap terlihat**: posisi kanan atau kiri bawah, bisa dikecilkan jadi tombol bulat (dengan
-  jumlah kartu yang belum hafal) atau disembunyikan. Tampilkan lagi lewat ikon toolbar atau
+**Membuat kartu**
+- **Tambah kata sendiri**: isi kata, arti, dan contoh kalimat. Tombol *Cari arti otomatis*
+  memberi saran arti, definisi, dan cara baca. Kata masuk ke dek **Kosakata saya** atau dek lain.
+- **Blok teks**: blok sebuah kata di halaman mana pun, lalu klik tombol **Flashcard** yang
+  muncul. Popover menampilkan arti, definisi, dan kalimat asalnya. Kamu bisa mengubah artinya,
+  lalu pilih **Tambah** atau **Batal**. Kalau yang diblok satu paragraf, muncul **Pilih kata dari
+  teks ini**. Menu klik kanan juga tersedia.
+- **Artikel → kartu**: *Buat dari halaman ini* mengambil isi utama halaman (menu, footer,
+  referensi, dan link "edit" diabaikan). Kata umum, nama orang/tempat, dan singkatan dibuang.
+- **Upload dokumen**: PDF, Word (DOCX), EPUB, PowerPoint (PPTX), ODT, TXT, Markdown, HTML, dan
+  subtitle SRT/VTT, maksimal 25 MB. Dokumen dibaca di komputer pengguna dan tidak dikirim ke
+  mana pun. Bahasanya dideteksi otomatis.
+- **Pilih kata dulu**: dari artikel, paragraf, atau dokumen, Lexiflip menawarkan sampai 60 kata
+  sebagai chip. Klik untuk memilih atau membatalkan, lalu simpan ke dek baru atau dek yang ada.
+
+**Arti**
+- Terjemahan (default Bahasa Indonesia, bisa diganti ke 14 bahasa), definisi bahasa Inggris
+  dengan kelas kata, cara baca, bentuk dasar (*retreating → retreat*), dan kalimat asal dengan
+  kata yang di-highlight.
+- Kalau sebuah kata tidak punya terjemahan, definisinya yang diterjemahkan
+  (*chamber* → "Kamar atau seperangkat kamar…").
+- Arti yang kamu ketik atau edit sendiri tidak akan ditimpa oleh pencarian otomatis.
+
+**Belajar**
+- Kartu bolak-balik (klik atau <kbd>Spasi</kbd>), <kbd>←</kbd>/<kbd>→</kbd> untuk pindah, tombol
+  *Sudah hafal*/*Belum hafal*, filter kartu yang belum hafal, acak urutan, dan pelafalan suara.
+- **Halaman belajar penuh** (tab tersendiri): belajar, tambah kata, upload dokumen, kelola dek,
+  dan **daftar kata** dengan pencarian, centang hafal, edit, dan hapus. Bisa dibuka dari popup
+  di ikon toolbar, tombol ↗ di widget, atau saat widget tidak bisa tampil (tab baru, halaman
+  browser).
+- **Widget mengambang**: pojok kanan atau kiri bawah. Bisa dikecilkan jadi tombol bulat (dengan
+  jumlah kartu yang belum hafal) atau disembunyikan. Tampilkan lagi lewat popup toolbar atau
   <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>K</kbd>.
-- **Dek tersimpan**: sampai 30 dek terakhir, lengkap dengan progres hafalannya.
 - Mode gelap mengikuti pengaturan sistem.
 
-Bahasa artikel yang didukung: semua bahasa berspasi, plus Jepang, Mandarin, dan Korea (dipecah
-dengan `Intl.Segmenter`). Definisi lengkap hanya tersedia untuk artikel berbahasa Inggris. Untuk
-bahasa lain, kartu hanya berisi terjemahan.
+Bahasa sumber yang didukung: semua bahasa berspasi, plus Jepang, Mandarin, dan Korea (dipecah
+dengan `Intl.Segmenter`). Definisi lengkap hanya tersedia untuk kata bahasa Inggris. Untuk bahasa
+lain, kartu berisi terjemahan.
 
 ## Struktur
 
 ```
 ext-lexiflip/
 ├─ src/                    kode ekstensi (tanpa manifest; manifest dibuat saat build)
-│  ├─ background.js        service worker: cari arti, cache, satu-satunya penulis data dek
-│  ├─ content/
-│  │  ├─ extract.js        artikel/teks → daftar kata + kalimat asal
-│  │  ├─ styles.js         CSS widget (dipasang di dalam Shadow DOM)
-│  │  └─ widget.js         UI widget mengambang
+│  ├─ background.js        cari arti, cache, satu-satunya penulis data dek, pasang ulang widget
+│  ├─ shared/              dipakai widget, halaman belajar, dan popup
+│  │  ├─ core.js           konstanta, helper, dan morph() (render tanpa membongkar DOM)
+│  │  ├─ extract.js        teks → daftar kata + kalimat asal, deteksi bahasa
+│  │  ├─ styles.js         CSS (dipasang di dalam Shadow DOM untuk widget)
+│  │  └─ ui.js             seluruh tampilan: belajar, daftar, form, pilih kata, dek, upload
+│  ├─ content/widget.js    widget mengambang + tombol saat memblok teks
+│  ├─ app/                 halaman belajar penuh + pembaca dokumen (docparse.js)
+│  ├─ popup/               popup ikon toolbar
 │  └─ icons/               ikon PNG (dibuat oleh scripts/make-icons.mjs)
 ├─ scripts/
 │  ├─ build.mjs            manifest per browser + folder dist/ + ZIP siap upload
@@ -50,9 +76,10 @@ ext-lexiflip/
 
 ## Menjalankan
 
-Butuh Node.js 20+. Tidak ada `npm install` karena tidak ada dependency.
+Butuh Node.js 20+.
 
 ```bash
+npm install       # sekali saja: memasang pdf.js (pembaca PDF)
 npm test          # test ekstraksi kata & alur background
 npm run build     # dist/chrome, dist/edge, dist/firefox + ZIP-nya
 npm run icons     # gambar ulang ikon (hanya kalau desainnya diubah)
@@ -68,28 +95,27 @@ Jalankan `npm run build` dulu, lalu:
 | Edge | `edge://extensions` → aktifkan **Developer mode** → **Load unpacked** → pilih `dist/edge` |
 | Firefox | `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on** → pilih `dist/firefox/manifest.json` |
 
-Setelah mengubah kode: build ulang, klik tombol reload ekstensi, lalu **muat ulang tab** yang
-sudah terbuka. Widget lama di tab itu akan berhenti bekerja sampai halamannya dimuat ulang. Ini
-juga berlaku untuk tab yang sudah terbuka sebelum ekstensi dipasang.
+Setelah mengubah kode: build ulang, lalu klik tombol reload ekstensi. Widget di tab yang sudah
+terbuka akan diganti otomatis dengan versi baru, jadi tab tidak perlu dimuat ulang.
 
 Add-on sementara di Firefox hilang saat Firefox ditutup. Firefox butuh versi 140 atau lebih baru.
 
 ## Upload ke store
 
 Naikkan `version` di `package.json` setiap kali upload, lalu `npm run build`.
-Isi listing (deskripsi, kategori, alasan izin) sudah disiapkan di [docs/STORE.md](docs/STORE.md).
-Kebijakan privasi ada di [PRIVACY.md](PRIVACY.md). Store meminta URL publik untuk kebijakan
-privasi. Selama repo ini publik, cukup pakai
+Isi listing (deskripsi, kategori, alasan izin, catatan untuk reviewer) sudah disiapkan di
+[docs/STORE.md](docs/STORE.md). Kebijakan privasi ada di [PRIVACY.md](PRIVACY.md). Store meminta
+URL publik untuk kebijakan privasi. Selama repo ini publik, cukup pakai
 `https://github.com/roroayup/ext-lexiflip/blob/main/PRIVACY.md`.
 
 | Store | File | Catatan |
 | --- | --- | --- |
 | [Chrome Web Store](https://chrome.google.com/webstore/devconsole) | `dist/lexiflip-chrome-<versi>.zip` | Biaya pendaftaran developer sekali bayar US$5. Wajib mengisi tab *Privacy practices*. |
 | [Microsoft Edge Add-ons](https://partner.microsoft.com/dashboard/microsoftedge/overview) | `dist/lexiflip-edge-<versi>.zip` | Gratis, lewat Partner Center. |
-| [Firefox Add-ons (AMO)](https://addons.mozilla.org/developers/) | `dist/lexiflip-firefox-<versi>.zip` | Gratis. Kode tidak di-minify, jadi tidak perlu mengunggah source code terpisah. |
+| [Firefox Add-ons (AMO)](https://addons.mozilla.org/developers/) | `dist/lexiflip-firefox-<versi>.zip` | Gratis. Kode Lexiflip tidak di-minify. pdf.js adalah rilis resmi Mozilla tanpa perubahan (lihat catatan reviewer di STORE.md). |
 
 Semua store butuh minimal satu screenshot 1280×800 atau 640×400. Ambil dari widget yang
-sedang terbuka di atas sebuah artikel.
+sedang terbuka di atas sebuah artikel, popover saat memblok kata, dan halaman belajar.
 
 Karena ekstensi ini berjalan di semua situs (agar widget bisa muncul di mana saja), review
 pertama biasanya lebih lama, sekitar beberapa hari.
@@ -101,12 +127,16 @@ karena Firefox mengenali add-on dari ID itu.
 
 - Widget tidak bisa muncul di halaman milik browser (`chrome://`, `edge://`, `about:`), di Chrome
   Web Store/Edge Add-ons/AMO, di penampil PDF bawaan, dan di halaman tab baru. Ini aturan semua
-  browser untuk ekstensi.
+  browser untuk ekstensi. Di halaman seperti itu, pakai popup toolbar → *Buka halaman belajar*.
 - Widget hanya ada di dalam jendela browser. Ekstensi tidak bisa menampilkan jendela yang selalu
   di atas aplikasi lain di luar browser.
+- PDF hasil scan (berupa gambar) tidak bisa dibaca karena tidak ada teksnya. Format lama .doc dan
+  .ppt belum didukung; simpan ulang sebagai .docx/.pptx.
 - Arti diambil dari layanan gratis:
   [Free Dictionary API](https://dictionaryapi.dev) untuk definisi dan
   [MyMemory](https://mymemory.translated.net) untuk terjemahan. MyMemory membatasi pemakaian
-  anonim sekitar 5.000 karakter per hari per IP (±500–1.000 kata). Hasil yang sudah pernah dicari
-  disimpan di cache, jadi kata yang sama tidak dihitung lagi. Terjemahan satu kata tanpa konteks
-  kadang kurang tepat, dan kalimat asal di kartu membantu menutupi kekurangan itu.
+  anonim sekitar 5.000 karakter per hari per IP (±500–1.000 kata). Free Dictionary API juga
+  sesekali menolak sementara (HTTP 429/502). Lexiflip mencoba ulang otomatis, dan kartu yang
+  tetap gagal punya tombol *Coba lagi*. Hasil yang sudah pernah dicari disimpan di cache.
+  Terjemahan otomatis kadang kurang tepat. Arti bisa diedit kapan saja, dan editan tidak akan
+  ditimpa.
