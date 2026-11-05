@@ -1,0 +1,19 @@
+{
+  "name": "ext-lexiflip",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Lexiflip: browser extension that turns articles into vocabulary flashcards (Chrome, Edge, Firefox).",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:chrome": "node scripts/build.mjs chrome",
+    "build:edge": "node scripts/build.mjs edge",
+    "build:firefox": "node scripts/build.mjs firefox",
+    "icons": "node scripts/make-icons.mjs",
+    "test": "node --test",
+    "lint:firefox": "npx --yes web-ext lint --source-dir dist/firefox"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
